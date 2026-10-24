@@ -1,0 +1,1007 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import warnings
+from datetime import datetime
+import gc
+import joblib
+from collections import Counter
+from tqdm import tqdm
+from scipy import stats
+from scipy.stats import chi2_contingency
+from imblearn.over_sampling import SMOTE, ADASYN
+
+from sklearn.preprocessing import StandardScaler, LabelEncoder, MinMaxScaler, RobustScaler
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, StratifiedKFold
+from sklearn.utils import resample, compute_class_weight
+from sklearn.impute import SimpleImputer, KNNImputer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (accuracy_score, precision_score, recall_score,
+                           f1_score, confusion_matrix, roc_auc_score,
+                           roc_curve, classification_report, mean_squared_error,
+                           precision_recall_curve, average_precision_score)
+from sklearn.decomposition import PCA
+
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.layers import (LSTM, Dense, Dropout, BatchNormalization,
+                                   Bidirectional, Input, Concatenate, GRU,
+                                   GaussianNoise, Lambda, Multiply, Add, Reshape)
+from tensorflow.keras.callbacks import (EarlyStopping, ReduceLROnPlateau,
+                                      ModelCheckpoint, TensorBoard)
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.regularizers import l1_l2
+from tensorflow.keras.metrics import Precision, Recall, AUC
+from tensorflow.keras import backend as K
+
+warnings.filterwarnings('ignore')
+plt.style.use('seaborn-v0_8-darkgrid')
+sns.set_palette("husl")
+np.random.seed(42)
+tf.random.set_seed(42)
+
+pd.set_option('display.max_columns', None)
+pd.set_option('display.float_format', lambda x: '%.3f' % x)
+
+df = pd.read_csv('credit_risk_dataset.csv')
+df.head()
+
+df.shape
+
+df.info()
+df.describe()
+
+print(f"Kolom Duplikat: {df.duplicated().sum()}")
+missing_values = df.isnull().sum()
+missing_values[missing_values > 0]
+
+numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+numeric_cols.remove('loan_status')
+
+plt.figure(figsize=(16, 20))
+
+for idx, col in enumerate(numeric_cols):
+    plt.subplot(4, 2, idx + 1)
+    sns.histplot(data=df, x=col, kde=True, bins=30, color='skyblue')
+    plt.title(f'Distribusi {col}', fontsize=12, fontweight='bold')
+    plt.axvline(df[col].mean(), color='red', linestyle='--', linewidth=2,
+                label=f'Mean: {df[col].mean():.2f}')
+    plt.axvline(df[col].median(), color='green', linestyle='--', linewidth=2,
+                label=f'Median: {df[col].median():.2f}')
+    plt.legend()
+
+plt.tight_layout()
+plt.show()
+
+categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
+
+sns.set_style("darkgrid")
+plt.figure(figsize=(18, 12))
+
+for idx, col in enumerate(categorical_cols[:4]):
+    ax = plt.subplot(2, 2, idx + 1)
+    sns.countplot(
+        data=df,
+        x=col,
+        palette='viridis',
+        order=df[col].value_counts().index
+    )
+
+    for p in ax.patches:
+        count = int(p.get_height())
+        x = p.get_x() + p.get_width() / 2
+        y = p.get_height()
+        ax.text(x, y + (count * 0.01), f'{count:,}', ha='center', fontsize=11)
+
+    plt.title(f'Distribusi Kolom: {col}', fontsize=14, fontweight='bold')
+    plt.xlabel('')
+    plt.ylabel('Jumlah (Count)', fontsize=12)
+    plt.xticks(rotation=10, ha='center')
+
+plt.tight_layout(pad=3.0)
+plt.show()
+
+plt.figure(figsize=(20, 8))
+
+plt.subplot(2, 4, 1)
+risk_dist = df['loan_status'].value_counts()
+colors = ['#e74c3c', '#2ecc71']
+plt.pie(risk_dist.values, labels=['Gagal Bayar', 'Lancar'],
+        autopct='%1.1f%%', colors=colors, startangle=90)
+plt.title('Distribusi Portfolio Kredit', fontsize=14, fontweight='bold')
+
+plt.subplot(2, 4, 2)
+grade_risk = df.groupby('loan_grade')['loan_status'].agg(['mean', 'count'])
+grade_risk['tingkat_gagal_bayar'] = (1 - grade_risk['mean']) * 100
+grade_risk['tingkat_gagal_bayar'].plot(kind='bar', color='coral')
+plt.title('Tingkat Gagal Bayar per Grade', fontsize=14, fontweight='bold')
+plt.xlabel('Grade Pinjaman')
+plt.ylabel('Tingkat Gagal Bayar (%)')
+plt.xticks(rotation=0)
+
+plt.subplot(2, 4, 3)
+plt.hist(df['loan_amnt'], bins=30, color='skyblue', edgecolor='black')
+plt.title('Distribusi Jumlah Pinjaman', fontsize=14, fontweight='bold')
+plt.xlabel('Jumlah Pinjaman ($)')
+plt.ylabel('Frekuensi')
+
+plt.subplot(2, 4, 4)
+scatter = plt.scatter(df['person_income'], df['loan_amnt'],
+                     c=df['loan_status'], cmap='RdYlGn', alpha=0.6)
+plt.colorbar(scatter, label='Status (0=Gagal, 1=Lancar)')
+plt.title('Pendapatan vs Jumlah Pinjaman', fontsize=14, fontweight='bold')
+plt.xlabel('Pendapatan Tahunan ($)')
+plt.ylabel('Jumlah Pinjaman ($)')
+
+plt.subplot(2, 4, 5)
+intent_analysis = df.groupby('loan_intent')['loan_status'].agg(['mean', 'count'])
+intent_analysis['tingkat_sukses'] = intent_analysis['mean'] * 100
+intent_analysis['tingkat_sukses'].plot(kind='barh', color='lightgreen')
+plt.title('Tingkat Sukses per Tujuan Pinjaman', fontsize=14, fontweight='bold')
+plt.xlabel('Tingkat Sukses (%)')
+
+plt.subplot(2, 4, 6)
+sns.boxplot(data=df, x='loan_status', y='loan_int_rate', palette=['#e74c3c', '#2ecc71'])
+plt.title('Suku Bunga vs Status Pinjaman', fontsize=14, fontweight='bold')
+plt.xticks([0, 1], ['Gagal Bayar', 'Lancar'])
+plt.ylabel('Suku Bunga (%)')
+
+plt.subplot(2, 4, 7)
+age_bins = [18, 25, 35, 45, 55, 65, 100]
+age_labels = ['18-24', '25-34', '35-44', '45-54', '55-64', '65+']
+df['kelompok_usia_temp'] = pd.cut(df['person_age'], bins=age_bins, labels=age_labels)
+age_analysis = df.groupby('kelompok_usia_temp')['loan_status'].agg(['mean', 'count'])
+age_analysis['tingkat_gagal_bayar'] = (1 - age_analysis['mean']) * 100
+age_analysis['tingkat_gagal_bayar'].plot(kind='bar', color='lightcoral')
+plt.title('Tingkat Gagal Bayar per Kelompok Usia', fontsize=14, fontweight='bold')
+plt.xlabel('Kelompok Usia')
+plt.ylabel('Tingkat Gagal Bayar (%)')
+plt.xticks(rotation=0)
+
+plt.subplot(2, 4, 8)
+home_analysis = pd.crosstab(df['person_home_ownership'], df['loan_status'], normalize='index') * 100
+home_analysis[0].plot(kind='bar', color='#e74c3c')
+plt.title('Tingkat Gagal Bayar per Status Kepemilikan Rumah', fontsize=14, fontweight='bold')
+plt.xlabel('Kepemilikan Rumah')
+plt.ylabel('Tingkat Gagal Bayar (%)')
+plt.xticks(rotation=0)
+
+plt.tight_layout()
+plt.show()
+
+df.drop('kelompok_usia_temp', axis=1, inplace=True)
+
+plt.figure(figsize=(18, 5))
+
+plt.subplot(1, 3, 1)
+sns.countplot(data=df, x='loan_status', palette=['#e74c3c', '#2ecc71'])
+plt.title('Distribusi Status Pinjaman', fontsize=14, fontweight='bold')
+plt.xlabel('Loan Status')
+plt.ylabel('Count')
+plt.xticks([0, 1], ['Gagal Bayar', 'Lancar'])
+
+ax = plt.gca()
+for p in ax.patches:
+    ax.annotate(f'{int(p.get_height()):,}',
+                (p.get_x() + p.get_width()/2., p.get_height()),
+                ha='center', va='bottom', fontweight='bold')
+
+plt.subplot(1, 3, 2)
+df['loan_status'].value_counts().plot.pie(
+    autopct='%1.1f%%',
+    colors=['#e74c3c', '#2ecc71'],
+    labels=['Gagal Bayar', 'Lancar'],
+    startangle=90
+)
+plt.title('Proporsi Status Pinjaman', fontsize=14, fontweight='bold')
+plt.ylabel('')
+
+plt.subplot(1, 3, 3)
+risk_analysis = df.groupby(pd.cut(df['loan_int_rate'], bins=5))['loan_status'].agg(['sum', 'count', 'mean'])
+risk_analysis['persen_gagal_bayar'] = risk_analysis['mean'] * 100
+risk_analysis['persen_gagal_bayar'].plot(kind='bar', color='coral')
+plt.title('Tingkat Gagal Bayar berdasarkan Suku Bunga', fontsize=14, fontweight='bold')
+plt.xlabel('Rentang Suku Bunga (%)')
+plt.ylabel('Persentase Gagal Bayar (%)')
+plt.xticks(rotation=0)
+
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(12, 10))
+numeric_df = df.select_dtypes(include=[np.number])
+correlation_matrix = numeric_df.corr()
+
+mask = np.triu(np.ones_like(correlation_matrix, dtype=bool))
+sns.heatmap(correlation_matrix, mask=mask, annot=True, fmt='.2f',
+            cmap='coolwarm', center=0, square=True, linewidths=1,
+            cbar_kws={"shrink": 0.8})
+plt.title('Matriks Korelasi Fitur', fontsize=16, fontweight='bold')
+plt.tight_layout()
+plt.show()
+
+fig, axes = plt.subplots(3, 3, figsize=(18, 15))
+axes = axes.ravel()
+
+important_features = ['loan_int_rate', 'person_income', 'loan_amnt',
+                     'loan_percent_income', 'person_age', 'cb_person_cred_hist_length',
+                     'person_emp_length', 'loan_grade', 'person_home_ownership']
+
+for idx, feature in enumerate(important_features):
+    if idx < len(axes):
+        if feature in numeric_cols:
+            sns.boxplot(data=df, x='loan_status', y=feature, palette=['#e74c3c', '#2ecc71'], ax=axes[idx])
+            axes[idx].set_xticklabels(['Gagal Bayar', 'Lancar'])
+        else:
+            pd.crosstab(df[feature], df['loan_status']).plot(kind='bar', ax=axes[idx],
+                                                             color=['#e74c3c', '#2ecc71'])
+            axes[idx].legend(['Gagal Bayar', 'Lancar'])
+
+        axes[idx].set_title(f'{feature} vs Status Pinjaman', fontsize=12, fontweight='bold')
+        axes[idx].tick_params(axis='x', rotation=0)
+
+plt.tight_layout()
+plt.show()
+
+df_processed = df.copy()
+
+if df_processed['person_emp_length'].isnull().any():
+    df_processed['person_emp_length'] = df_processed.groupby('loan_intent')['person_emp_length'].transform(
+        lambda x: x.fillna(x.median() if not x.median() != x.median() else x.mean())
+    )
+    df_processed['person_emp_length'].fillna(df_processed['person_emp_length'].median(), inplace=True)
+
+outlier_rules = {
+    'person_age': {'min': 18, 'max': 100},
+    'person_income': {'percentile': [1, 99.5]},
+    'loan_percent_income': {'min': 0, 'max': 1},
+    'person_emp_length': {'percentile': [0, 99]},
+    'cb_person_cred_hist_length': {'percentile': [0, 99.5]}
+}
+
+df_clean = df_processed.copy()
+
+for col, rules in outlier_rules.items():
+    if 'min' in rules and 'max' in rules:
+        df_clean[col] = df_clean[col].clip(lower=rules.get('min'), upper=rules.get('max'))
+    elif 'percentile' in rules:
+        lower = df_clean[col].quantile(rules['percentile'][0]/100)
+        upper = df_clean[col].quantile(rules['percentile'][1]/100)
+        df_clean[col] = df_clean[col].clip(lower=lower, upper=upper)
+
+cols_to_plot = ['person_age', 'person_income', 'loan_percent_income',
+                'person_emp_length', 'cb_person_cred_hist_length', 'loan_amnt']
+
+plt.figure(figsize=(18, 10))
+
+for idx, col in enumerate(cols_to_plot):
+    plt.subplot(2, 3, idx + 1)
+
+    data_comparison = pd.DataFrame({
+        'Asli': df[col],
+        'Dibersihkan': df_clean[col]
+    })
+    data_comparison.boxplot(patch_artist=True)
+
+    changed_pct = ((df[col] != df_clean[col]).sum() / len(df)) * 100
+
+    plt.title(f'{col}\n({changed_pct:.1f}% data diubah)', fontsize=12)
+    plt.ylabel('Nilai')
+    plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+df_feat = df_clean.copy()
+
+df_feat['debt_to_income_category'] = pd.cut(
+    df_feat['loan_percent_income'],
+    bins=[0, 0.1, 0.2, 0.3, 0.4, 1.0],
+    labels=['Very Low', 'Low', 'Medium', 'High', 'Very High']
+)
+
+df_feat['age_group'] = pd.cut(
+    df_feat['person_age'],
+    bins=[0, 25, 35, 45, 55, 65, 100],
+    labels=['Gen Z', 'Millennial', 'Gen X', 'Boomer', 'Senior', 'Elder']
+)
+
+df_feat['income_category'] = pd.qcut(
+    df_feat['person_income'],
+    q=[0, 0.2, 0.4, 0.6, 0.8, 1.0],
+    labels=['Very Low', 'Low', 'Medium', 'High', 'Very High'],
+    duplicates='drop'
+)
+
+df_feat['credit_history_category'] = pd.cut(
+    df_feat['cb_person_cred_hist_length'],
+    bins=[0, 2, 5, 10, 20, 100],
+    labels=['New', 'Short', 'Medium', 'Long', 'Very Long']
+)
+
+df_feat['employment_stability'] = pd.cut(
+    df_feat['person_emp_length'],
+    bins=[0, 2, 5, 10, 100],
+    labels=['Unstable', 'Stable', 'Very Stable', 'Highly Stable']
+)
+
+grade_risk = {'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5, 'F': 6, 'G': 7}
+df_feat['grade_risk_score'] = df_feat['loan_grade'].map(grade_risk)
+
+df_feat['combined_risk_score'] = (
+    df_feat['loan_int_rate'] * df_feat['grade_risk_score'] / 10
+)
+
+df_feat['income_to_age_ratio'] = df_feat['person_income'] / (df_feat['person_age'] + 1)
+df_feat['loan_to_income_ratio'] = df_feat['loan_amnt'] / (df_feat['person_income'] + 1)
+df_feat['credit_utilization'] = (
+    df_feat['loan_amnt'] / (df_feat['person_income'] * df_feat['cb_person_cred_hist_length'] + 1)
+)
+
+for col in ['person_income', 'loan_amnt']:
+    df_feat[f'{col}_log'] = np.log1p(df_feat[col])
+
+engineered_features = [
+    'combined_risk_score', 'income_to_age_ratio', 'loan_to_income_ratio',
+    'credit_utilization', 'person_income_log', 'loan_amnt_log'
+]
+
+sns.set_style("darkgrid")
+plt.figure(figsize=(18, 12))
+
+for idx, feature in enumerate(engineered_features):
+    plt.subplot(2, 3, idx + 1)
+
+    sns.violinplot(
+        data=df_feat,
+        x='loan_status',
+        y=feature,
+        palette=['#3498db', '#e74c3c']
+    )
+
+    plt.title(f'Distribusi Fitur "{feature}"\nBerdasarkan Status Pinjaman', fontsize=14, fontweight='bold')
+    plt.xlabel('Status Pinjaman', fontsize=12)
+    plt.ylabel(f'Nilai {feature}', fontsize=12)
+    plt.xticks([0, 1], ['Lancar', 'Gagal Bayar'])
+
+plt.tight_layout(pad=3.0)
+plt.show()
+
+df_encoded = df_feat.copy()
+
+ordinal_mappings = {
+    'loan_grade': {'A': 7, 'B': 6, 'C': 5, 'D': 4, 'E': 3, 'F': 2, 'G': 1},
+    'employment_stability': {'Unstable': 1, 'Stable': 2, 'Very Stable': 3, 'Highly Stable': 4},
+    'debt_to_income_category': {'Very Low': 1, 'Low': 2, 'Medium': 3, 'High': 4, 'Very High': 5},
+    'income_category': {'Very Low': 1, 'Low': 2, 'Medium': 3, 'High': 4, 'Very High': 5},
+    'credit_history_category': {'New': 1, 'Short': 2, 'Medium': 3, 'Long': 4, 'Very Long': 5}
+}
+
+encoding_mappings = {}
+for col, mapping in ordinal_mappings.items():
+    if col in df_encoded.columns:
+        df_encoded[f'{col}_encoded'] = df_encoded[col].map(mapping)
+        encoding_mappings[col] = mapping
+
+target_encoding = df_encoded.groupby('loan_intent')['loan_status'].agg(['mean', 'count'])
+global_mean = df_encoded['loan_status'].mean()
+smoothing_factor = 10
+target_encoding['smoothed_mean'] = (
+    (target_encoding['mean'] * target_encoding['count'] + global_mean * smoothing_factor) /
+    (target_encoding['count'] + smoothing_factor)
+)
+
+df_encoded = df_encoded.merge(
+    target_encoding[['smoothed_mean']],
+    left_on='loan_intent',
+    right_index=True,
+    how='left'
+)
+df_encoded.rename(columns={'smoothed_mean': 'loan_intent_target_encoded'}, inplace=True)
+
+categorical_cols = ['person_home_ownership', 'cb_person_default_on_file', 'age_group']
+df_encoded = pd.get_dummies(
+    df_encoded,
+    columns=categorical_cols,
+    prefix=categorical_cols,
+    drop_first=True
+)
+
+cols_to_drop = ['loan_grade', 'loan_intent', 'debt_to_income_category',
+                'income_category', 'credit_history_category', 'employment_stability']
+
+cols_to_drop = [col for col in cols_to_drop if col in df_encoded.columns]
+df_encoded.drop(cols_to_drop, axis=1, inplace=True)
+
+feature_names = [col for col in df_encoded.columns if col != 'loan_status']
+
+correlations = df_encoded.corr()['loan_status'].sort_values(ascending=False)
+correlations = correlations[correlations.index != 'loan_status']
+
+plt.figure(figsize=(10, 12))
+top_n = 25
+top_correlations = pd.concat([correlations.head(top_n//2), correlations.tail(top_n//2)])
+colors = ['#2ecc71' if x > 0 else '#e74c3c' for x in top_correlations.values]
+
+plt.barh(top_correlations.index, top_correlations.values, color=colors)
+plt.title('Top 25 Fitur Berkorelasi dengan Status Pinjaman', fontsize=14, fontweight='bold')
+plt.xlabel('Koefisien Korelasi')
+plt.axvline(x=0, color='black', linestyle='-', linewidth=0.5)
+plt.tight_layout()
+plt.show()
+
+X = df_encoded.drop('loan_status', axis=1)
+y = df_encoded['loan_status']
+
+X_temp, X_test, y_temp, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+X_train, X_val, y_train, y_val = train_test_split(
+    X_temp, y_temp, test_size=0.25, random_state=42, stratify=y_temp
+)
+
+plt.figure(figsize=(15, 5))
+splits = {'Train': y_train, 'Validation': y_val, 'Test': y_test}
+
+for idx, (name, data) in enumerate(splits.items()):
+    plt.subplot(1, 3, idx + 1)
+    data.value_counts().plot(kind='bar', color=['#e74c3c', '#2ecc71'])
+    plt.title(f'{name} Distribusi', fontsize=12, fontweight='bold')
+    plt.xlabel('Loan Status')
+    plt.ylabel('Count')
+    plt.xticks([0, 1], ['Gagal Bayar', 'Lancar'], rotation=0)
+
+    for i, v in enumerate(data.value_counts().values):
+        plt.text(i, v + 50, f'{v/len(data)*100:.1f}%', ha='center', fontweight='bold')
+
+plt.tight_layout()
+plt.show()
+
+scaler = RobustScaler()
+imputer = SimpleImputer(strategy='median')
+
+X_train_imputed = imputer.fit_transform(X_train)
+X_train_scaled = scaler.fit_transform(X_train_imputed)
+
+X_val_imputed = imputer.transform(X_val)
+X_val_scaled = scaler.transform(X_val_imputed)
+
+X_test_imputed = imputer.transform(X_test)
+X_test_scaled = scaler.transform(X_test_imputed)
+
+X_train_scaled = np.nan_to_num(X_train_scaled, nan=0.0)
+X_val_scaled = np.nan_to_num(X_val_scaled, nan=0.0)
+X_test_scaled = np.nan_to_num(X_test_scaled, nan=0.0)
+
+try:
+    sampler = ADASYN(random_state=42, n_neighbors=5)
+    X_train_balanced, y_train_balanced = sampler.fit_resample(X_train_scaled, y_train)
+except:
+    X_train_balanced, y_train_balanced = X_train_scaled, y_train
+
+print(f"Bentuk data asli: {X_train_scaled.shape}")
+print(f"Bentuk data setelah ADASYN: {X_train_balanced.shape}")
+
+plt.figure(figsize=(12, 5))
+
+plt.subplot(1, 2, 1)
+y_train.value_counts().plot(kind='bar', color=['#e74c3c', '#2ecc71'])
+plt.title('Sebelum Balancing', fontsize=14, fontweight='bold')
+plt.xlabel('Loan Status')
+plt.ylabel('Count')
+plt.xticks([0, 1], ['Default', 'Non-Default'], rotation=0)
+
+plt.subplot(1, 2, 2)
+pd.Series(y_train_balanced).value_counts().plot(kind='bar', color=['#e74c3c', '#2ecc71'])
+plt.title('Setelah ADASYN Balancing', fontsize=14, fontweight='bold')
+plt.xlabel('Status Pinjaman')
+plt.ylabel('Jumlah')
+plt.xticks([0, 1], ['Gagal Bayar', 'Lancar'], rotation=0)
+
+plt.tight_layout()
+plt.show()
+
+def create_sequences_3d(X, sequence_length=1):
+    n_samples, n_features = X.shape
+    X_seq = X.reshape((n_samples, sequence_length, n_features))
+    return X_seq
+
+sequence_length = 1
+X_train_lstm = create_sequences_3d(X_train_scaled, sequence_length)
+X_val_lstm = create_sequences_3d(X_val_scaled, sequence_length)
+X_test_lstm = create_sequences_3d(X_test_scaled, sequence_length)
+
+X_train_lstm = X_train_lstm.astype(np.float32)
+y_train = y_train.astype(np.float32)
+X_val_lstm = X_val_lstm.astype(np.float32)
+y_val = y_val.astype(np.float32)
+X_test_lstm = X_test_lstm.astype(np.float32)
+y_test = y_test.astype(np.float32)
+
+def focal_loss(gamma=2., alpha=0.25):
+    def focal_loss_fixed(y_true, y_pred):
+        y_true = tf.cast(y_true, tf.float32)
+        y_pred = tf.cast(y_pred, tf.float32)
+
+        epsilon = K.epsilon()
+        y_pred = K.clip(y_pred, epsilon, 1. - epsilon)
+
+        alpha_t = y_true * alpha + (1 - y_true) * (1 - alpha)
+        p_t = y_true * y_pred + (1 - y_true) * (1 - y_pred)
+        focal_term = tf.pow((1 - p_t), gamma)
+        cross_entropy = -tf.math.log(p_t)
+
+        loss = alpha_t * focal_term * cross_entropy
+        return tf.reduce_mean(loss)
+    return focal_loss_fixed
+
+class F1ScoreCallback(tf.keras.callbacks.Callback):
+    def __init__(self, validation_data):
+        super(F1ScoreCallback, self).__init__()
+        self.validation_data = validation_data
+
+    def on_epoch_end(self, epoch, logs=None):
+        X_val, y_val = self.validation_data
+        y_pred = self.model.predict(X_val, verbose=0)
+        y_pred_binary = (y_pred > 0.5).astype(int)
+
+        f1 = f1_score(y_val, y_pred_binary)
+
+        tn, fp, fn, tp = confusion_matrix(y_val, y_pred_binary).ravel()
+        sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+        balanced_acc = (sensitivity + specificity) / 2
+
+        logs['val_f1'] = f1
+        logs['val_balanced_acc'] = balanced_acc
+
+        if (epoch + 1) % 10 == 0:
+            print(f" — val_f1: {f1:.4f}, val_balanced_acc: {balanced_acc:.4f}")
+
+def create_improved_lstm_model(input_shape, learning_rate=0.001):
+    model = Sequential([
+        Input(shape=input_shape),
+        GaussianNoise(0.01),
+        LSTM(32, return_sequences=False,
+             kernel_regularizer=l1_l2(l1=1e-5, l2=1e-4),
+             recurrent_regularizer=l1_l2(l1=1e-5, l2=1e-4),
+             dropout=0.2,
+             recurrent_dropout=0.2),
+        BatchNormalization(),
+        Dense(16, activation='relu',
+              kernel_regularizer=l1_l2(l1=1e-5, l2=1e-4)),
+        Dropout(0.3),
+        Dense(8, activation='relu'),
+        Dropout(0.2),
+        Dense(1, activation='sigmoid')
+    ])
+
+    optimizer = Adam(learning_rate=learning_rate, clipnorm=1.0)
+
+    model.compile(
+        optimizer=optimizer,
+        loss='binary_crossentropy',
+        metrics=[
+            'accuracy',
+            tf.keras.metrics.Precision(name='precision'),
+            tf.keras.metrics.Recall(name='recall'),
+            tf.keras.metrics.AUC(name='auc')
+        ]
+    )
+    return model
+
+lstm_model_improved = create_improved_lstm_model(
+    input_shape=(sequence_length, X_train_lstm.shape[2]),
+    learning_rate=0.001
+)
+
+lstm_model_improved.summary()
+
+class_weight_values = compute_class_weight(
+    'balanced',
+    classes=np.unique(y_train),
+    y=y_train
+)
+class_weight_dict = dict(enumerate(class_weight_values))
+print(f"\nClass weights yang dihitung: {class_weight_dict}")
+
+f1_callback = F1ScoreCallback(validation_data=(X_val_lstm, y_val))
+
+callbacks_improved = [
+    EarlyStopping(
+        monitor='val_auc',
+        patience=25,
+        restore_best_weights=True,
+        verbose=1,
+        mode='max',
+        min_delta=0.0005
+    ),
+    ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.5,
+        patience=10,
+        min_lr=1e-6,
+        verbose=1
+    ),
+    ModelCheckpoint(
+        'best_lstm_model_improved.keras',
+        monitor='val_auc',
+        mode='max',
+        save_best_only=True,
+        verbose=1
+    ),
+    f1_callback
+]
+
+history_improved = lstm_model_improved.fit(
+    X_train_lstm,
+    y_train,
+    validation_data=(X_val_lstm, y_val),
+    epochs=150,
+    batch_size=128,
+    callbacks=callbacks_improved,
+    class_weight=class_weight_dict,
+    verbose=1,
+    shuffle=True
+)
+
+plt.figure(figsize=(15, 12))
+
+plt.subplot(2, 2, 1)
+plt.plot(history_improved.history['loss'], label='Training Loss', linewidth=2, color='palevioletred')
+plt.plot(history_improved.history['val_loss'], label='Validation Loss', linewidth=2, color='darkgoldenrod')
+plt.title('Model Loss', fontsize=14, fontweight='bold')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+plt.grid(True, alpha=0.5)
+
+plt.subplot(2, 2, 2)
+plt.plot(history_improved.history['accuracy'], label='Training Accuracy', linewidth=2, color='palevioletred')
+plt.plot(history_improved.history['val_accuracy'], label='Validation Accuracy', linewidth=2, color='darkgoldenrod')
+plt.title('Model Accuracy', fontsize=14, fontweight='bold')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.grid(True, alpha=0.5)
+
+plt.subplot(2, 2, 3)
+plt.plot(history_improved.history['precision'], label='Training Precision', linewidth=2, color='palevioletred')
+plt.plot(history_improved.history['val_precision'], label='Validation Precision', linewidth=2, color='forestgreen')
+plt.plot(history_improved.history['recall'], label='Training Recall', linewidth=2, color='lightseagreen')
+plt.plot(history_improved.history['val_recall'], label='Validation Recall', linewidth=2, color='darkgoldenrod')
+plt.title('Precision & Recall', fontsize=14, fontweight='bold')
+plt.xlabel('Epoch')
+plt.ylabel('Score')
+plt.legend()
+plt.grid(True, alpha=0.5)
+
+plt.subplot(2, 2, 4)
+plt.plot(history_improved.history['auc'], label='Training AUC', linewidth=2, color='palevioletred')
+plt.plot(history_improved.history['val_auc'], label='Validation AUC', linewidth=2, color='darkgoldenrod')
+plt.title('Model AUC', fontsize=14, fontweight='bold')
+plt.xlabel('Epoch')
+plt.ylabel('AUC')
+plt.legend()
+plt.grid(True, alpha=0.5)
+
+plt.tight_layout()
+plt.show()
+
+def evaluate_model(y_true, y_pred, y_pred_proba, model_name):
+    metrics = {
+        'accuracy': accuracy_score(y_true, y_pred),
+        'precision': precision_score(y_true, y_pred, zero_division=0),
+        'recall': recall_score(y_true, y_pred, zero_division=0),
+        'f1_score': f1_score(y_true, y_pred, zero_division=0),
+        'roc_auc': roc_auc_score(y_true, y_pred_proba),
+        'average_precision': average_precision_score(y_true, y_pred_proba)
+    }
+
+    cm = confusion_matrix(y_true, y_pred)
+
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=['Lancar', 'Gagal Bayar'],
+                yticklabels=['Lancar', 'Gagal Bayar'],
+                cbar_kws={'label': 'Jumlah'})
+
+    for i in range(2):
+        for j in range(2):
+            percentage = cm[i, j] / cm.sum() * 100
+            plt.text(j + 0.5, i + 0.7, f'({percentage:.1f}%)',
+                    ha='center', va='center', fontsize=10, color='gray')
+
+    plt.title(f'Confusion Matrix - {model_name}', fontsize=14, fontweight='bold')
+    plt.ylabel('Label Sebenarnya')
+    plt.xlabel('Label Prediksi')
+    plt.tight_layout()
+    plt.show()
+
+    return metrics, cm
+
+y_pred_lstm_proba = lstm_model_improved.predict(X_test_lstm)
+y_pred_lstm_proba = np.clip(y_pred_lstm_proba.flatten(), 0, 1)
+
+precision, recall, thresholds = precision_recall_curve(y_test, y_pred_lstm_proba)
+f1_scores = 2 * (precision * recall) / (precision + recall + 1e-10)
+optimal_idx = np.argmax(f1_scores)
+optimal_threshold = thresholds[optimal_idx]
+
+y_pred_lstm = (y_pred_lstm_proba > optimal_threshold).astype(int)
+
+lstm_metrics, lstm_cm = evaluate_model(y_test, y_pred_lstm, y_pred_lstm_proba, "LSTM")
+
+credit_scores = (1 - y_pred_lstm_proba) * 1000
+plt.figure(figsize=(15, 5))
+
+plt.subplot(1, 3, 1)
+plt.hist(credit_scores, bins=50, color='skyblue', edgecolor='black', alpha=0.7)
+plt.axvline(credit_scores.mean(), color='red', linestyle='--', linewidth=2,
+            label=f'Mean: {credit_scores.mean():.0f}')
+plt.axvline(np.median(credit_scores), color='green', linestyle='--', linewidth=2,
+            label=f'Median: {np.median(credit_scores):.0f}')
+plt.title('Distribusi Credit Score Keseluruhan', fontsize=14, fontweight='bold')
+plt.xlabel('Credit Score')
+plt.ylabel('Frekuensi')
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+plt.subplot(1, 3, 2)
+score_lancar = credit_scores[y_pred_lstm == 0]
+score_gagal = credit_scores[y_pred_lstm == 1]
+
+plt.hist(score_lancar, bins=30, alpha=0.6, label=f'Lancar (n={len(score_lancar)})',
+         color='#2ecc71', edgecolor='black')
+plt.hist(score_gagal, bins=30, alpha=0.6, label=f'Gagal Bayar (n={len(score_gagal)})',
+         color='#e74c3c', edgecolor='black')
+plt.title('Distribusi Credit Score berdasarkan Prediksi', fontsize=14, fontweight='bold')
+plt.xlabel('Credit Score')
+plt.ylabel('Frekuensi')
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+plt.subplot(1, 3, 3)
+data_box = pd.DataFrame({
+    'Credit Score': credit_scores,
+    'Prediksi': ['Lancar' if pred == 0 else 'Gagal Bayar' for pred in y_pred_lstm]
+})
+sns.boxplot(data=data_box, x='Prediksi', y='Credit Score', palette=['#2ecc71', '#e74c3c'])
+plt.title('Perbandingan Credit Score', fontsize=14, fontweight='bold')
+plt.ylabel('Credit Score')
+plt.grid(True, alpha=0.3, axis='y')
+
+plt.tight_layout()
+plt.show()
+
+thresholds_range = np.linspace(0.1, 0.9, 50)
+business_metrics = {
+    'approval_rate': [],
+    'default_capture_rate': [],
+    'precision': [],
+    'total_cost': [],
+    'expected_loss_rate': []
+}
+
+cost_matrix = {
+    'false_negative': 1000,
+    'false_positive': 200
+}
+
+for thresh in thresholds_range:
+    y_pred_thresh = (y_pred_lstm_proba > thresh).astype(int)
+    cm = confusion_matrix(y_test, y_pred_thresh)
+    tn, fp, fn, tp = cm.ravel()
+
+    approval_rate = (tn + fn) / len(y_test)
+    default_capture_rate = tp / (tp + fn) if (tp + fn) > 0 else 0
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    total_cost = fn * cost_matrix['false_negative'] + fp * cost_matrix['false_positive']
+    expected_loss_rate = fn / len(y_test)
+
+    business_metrics['approval_rate'].append(approval_rate)
+    business_metrics['default_capture_rate'].append(default_capture_rate)
+    business_metrics['precision'].append(precision)
+    business_metrics['total_cost'].append(total_cost)
+    business_metrics['expected_loss_rate'].append(expected_loss_rate)
+
+plt.figure(figsize=(18, 10))
+
+plt.subplot(2, 3, 1)
+plt.plot(thresholds_range, business_metrics['approval_rate'], 'b-', linewidth=2, label='Tingkat Persetujuan')
+plt.plot(thresholds_range, business_metrics['default_capture_rate'], 'r-', linewidth=2, label='Tingkat Tangkap Default')
+plt.axvline(optimal_threshold, color='green', linestyle='--', label=f'Threshold Optimal ({optimal_threshold:.3f})')
+plt.xlabel('Threshold')
+plt.ylabel('Rate')
+plt.title('Trade-off: Persetujuan vs Deteksi Default', fontsize=14, fontweight='bold')
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+plt.subplot(2, 3, 2)
+plt.plot(thresholds_range, business_metrics['total_cost'], 'purple', linewidth=2)
+plt.axvline(optimal_threshold, color='green', linestyle='--', label=f'Threshold Optimal')
+min_cost_idx = np.argmin(business_metrics['total_cost'])
+plt.axvline(thresholds_range[min_cost_idx], color='red', linestyle='--',
+            label=f'Min Cost ({thresholds_range[min_cost_idx]:.3f})')
+plt.xlabel('Threshold')
+plt.ylabel('Total Biaya ($)')
+plt.title('Analisis Biaya Total', fontsize=14, fontweight='bold')
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+plt.subplot(2, 3, 3)
+plt.plot(thresholds_range, business_metrics['expected_loss_rate'], 'orange', linewidth=2)
+plt.axvline(optimal_threshold, color='green', linestyle='--', label=f'Threshold Optimal')
+plt.xlabel('Threshold')
+plt.ylabel('Expected Loss Rate')
+plt.title('Tingkat Kerugian yang Diharapkan', fontsize=14, fontweight='bold')
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+plt.subplot(2, 3, 4)
+plt.scatter(business_metrics['approval_rate'], business_metrics['precision'],
+           c=thresholds_range, cmap='viridis', s=50)
+plt.colorbar(label='Threshold')
+plt.xlabel('Tingkat Persetujuan')
+plt.ylabel('Precision')
+plt.title('Trade-off: Persetujuan vs Precision', fontsize=14, fontweight='bold')
+plt.grid(True, alpha=0.3)
+
+plt.subplot(2, 3, 5)
+n_applications = 1000
+avg_loan_amount = df['loan_amnt'].mean()
+
+for i, thresh in enumerate([0.3, 0.5, optimal_threshold, 0.7]):
+    y_pred_sim = (y_pred_lstm_proba > thresh).astype(int)
+    cm_sim = confusion_matrix(y_test, y_pred_sim)
+    tn, fp, fn, tp = cm_sim.ravel()
+
+    approved = (tn + fn) / len(y_test) * n_applications
+    defaults = fn / len(y_test) * n_applications
+
+    plt.bar(i, approved, color='lightblue', label='Disetujui' if i == 0 else '')
+    plt.bar(i, defaults, bottom=0, color='red', alpha=0.7, label='Default' if i == 0 else '')
+    plt.text(i, approved + 10, f'{approved:.0f}', ha='center')
+    plt.text(i, defaults/2, f'{defaults:.0f}', ha='center', color='white')
+
+plt.xticks(range(4), ['0.3', '0.5', f'{optimal_threshold:.2f}', '0.7'])
+plt.xlabel('Threshold')
+plt.ylabel('Jumlah Aplikasi')
+plt.title('Simulasi Portofolio (1000 Aplikasi)', fontsize=14, fontweight='bold')
+plt.legend()
+plt.grid(True, alpha=0.3, axis='y')
+
+plt.subplot(2, 3, 6)
+income_log = X_test['person_income_log'].values
+credit_scores_test = (1 - y_pred_lstm_proba) * 1000
+
+risk_categories = pd.cut(credit_scores_test,
+                        bins=[0, 400, 600, 800, 1000],
+                        labels=['Risiko Sangat Tinggi', 'Risiko Tinggi', 'Risiko Sedang', 'Risiko Rendah'],
+                        include_lowest=True)
+
+colors = {'Risiko Sangat Tinggi': '#e74c3c',
+         'Risiko Tinggi': '#e67e22',
+         'Risiko Sedang': '#f1c40f',
+         'Risiko Rendah': '#2ecc71'}
+
+for category in risk_categories.unique():
+    mask = risk_categories == category
+    plt.scatter(income_log[mask], credit_scores_test[mask],
+               label=category, color=colors[category], alpha=0.6, s=30)
+
+plt.xlabel('Log Pendapatan')
+plt.ylabel('Credit Score')
+plt.title('Segmentasi Nasabah: Pendapatan vs Credit Score', fontsize=14, fontweight='bold')
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(18, 8))
+
+plt.subplot(1, 3, 1)
+risk_counts = risk_categories.value_counts().sort_index()
+colors_list = ['#e74c3c', '#e67e22', '#f1c40f', '#2ecc71']
+risk_counts.plot(kind='bar', color=colors_list)
+plt.title('Distribusi Kategori Risiko', fontsize=14, fontweight='bold')
+plt.xlabel('Kategori Risiko')
+plt.ylabel('Jumlah Nasabah')
+plt.xticks(rotation=15)
+for i, v in enumerate(risk_counts.values):
+    plt.text(i, v + 20, f'{v/len(y_test)*100:.1f}%', ha='center', fontweight='bold')
+plt.grid(True, alpha=0.3, axis='y')
+
+plt.subplot(1, 3, 2)
+fpr_lstm, tpr_lstm, roc_thresholds = roc_curve(y_test, y_pred_lstm_proba)
+plt.plot(fpr_lstm, tpr_lstm, linewidth=2, label=f'LSTM (AUC = {lstm_metrics["roc_auc"]:.3f})', color='#3498db')
+plt.plot([0, 1], [0, 1], 'k--', linewidth=1, label='Random')
+
+important_thresholds = [0.3, 0.5, optimal_threshold, 0.7]
+for thresh in important_thresholds:
+    idx = np.argmin(np.abs(roc_thresholds - thresh))
+    plt.scatter(fpr_lstm[idx], tpr_lstm[idx], s=100, zorder=5)
+    plt.annotate(f'{thresh:.2f}', (fpr_lstm[idx], tpr_lstm[idx]),
+                xytext=(5, 5), textcoords='offset points')
+
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('Kurva ROC dengan Threshold', fontsize=14, fontweight='bold')
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+plt.subplot(1, 3, 3)
+precision_lstm, recall_lstm, pr_thresholds = precision_recall_curve(y_test, y_pred_lstm_proba)
+plt.plot(recall_lstm, precision_lstm, linewidth=2,
+         label=f'LSTM (AP = {lstm_metrics["average_precision"]:.3f})', color='#3498db')
+plt.axhline(y=y_test.sum()/len(y_test), color='k', linestyle='--', label='Baseline')
+plt.xlabel('Recall')
+plt.ylabel('Precision')
+plt.title('Kurva Precision-Recall', fontsize=14, fontweight='bold')
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+lstm_model_improved.save('credit_risk_lstm_model.keras')
+
+preprocessing_artifacts = {
+    'scaler': scaler,
+    'imputer': imputer,
+    'feature_names': feature_names,
+    'encoding_mappings': encoding_mappings,
+    'optimal_threshold': optimal_threshold
+}
+joblib.dump(preprocessing_artifacts, 'preprocessing_artifacts.pkl')
+
+evaluation_results = {
+    'lstm_metrics': lstm_metrics,
+    'business_metrics': {
+        'approval_rate': approval_rate,
+        'default_capture_rate': default_capture_rate,
+        'total_cost': total_cost,
+        'cost_per_application': total_cost/len(y_test)
+    }
+}
+joblib.dump(evaluation_results, 'evaluation_results.pkl')
+
+def predict_credit_risk(input_data):
+    artifacts = joblib.load('preprocessing_artifacts.pkl')
+    scaler = artifacts['scaler']
+    imputer = artifacts['imputer']
+    optimal_threshold = artifacts['optimal_threshold']
+
+    input_imputed = imputer.transform(input_data)
+    input_scaled = scaler.transform(input_imputed)
+    input_scaled = np.nan_to_num(input_scaled, nan=0.0)
+
+    lstm_model = tf.keras.models.load_model('credit_risk_lstm_model.keras')
+    input_lstm = create_sequences_3d(input_scaled, sequence_length=1)
+    lstm_proba = lstm_model.predict(input_lstm).flatten()
+    lstm_pred = (lstm_proba > optimal_threshold).astype(int)
+
+    credit_score = (1 - lstm_proba) * 1000
+
+    if credit_score < 400:
+        risk_category = 'Risiko Sangat Tinggi'
+    elif credit_score < 600:
+        risk_category = 'Risiko Tinggi'
+    elif credit_score < 800:
+        risk_category = 'Risiko Sedang'
+    else:
+        risk_category = 'Risiko Rendah'
+
+    results = {
+        'predictions': lstm_pred,
+        'probabilities': lstm_proba,
+        'credit_scores': credit_score,
+        'risk_categories': risk_category
+    }
+
+    return results
+
